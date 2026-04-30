@@ -1,29 +1,29 @@
 # BLACK-GOAT
 
-API Express minimale en TypeScript pour valider uniquement la connectivite publique Polymarket depuis un VPS Lightsail Irlande.
+BLACK-GOAT est une app de visualisation Polymarket en lecture seule.
 
-## Objectif
+Objectif actuel:
 
-Mode TEST uniquement:
+- afficher quelques marches publics Polymarket
+- recevoir les prix en live via le WebSocket backend
+- afficher LIVE / OFFLINE et la latence
+- ne faire aucun trading
+- ne faire aucune simulation
+- ne stocker aucune donnee en DB
 
-- pas de frontend
-- pas de DB
-- pas de wallet
-- pas de trading reel
-- pas de copy trading
-
-## Prerequis
+## Stack
 
 - Node.js 22
-- npm
-- PM2 sur le VPS
+- TypeScript
+- Express
+- React + Vite
+- WebSocket backend
 
 ## Installation
 
 ```bash
 npm install
 cp .env.example .env
-npm run build
 ```
 
 Variables par defaut:
@@ -32,15 +32,35 @@ Variables par defaut:
 MODE=TEST
 HOST=0.0.0.0
 PORT=4000
+POLYMARKET_MARKET_LIMIT=8
 ```
 
-## Scripts
+## Developpement
 
 ```bash
 npm run dev
+```
+
+Le frontend Vite tourne sur:
+
+```bash
+http://127.0.0.1:5173
+```
+
+Le backend Express tourne sur:
+
+```bash
+http://127.0.0.1:4000
+```
+
+## Production
+
+```bash
 npm run build
 npm start
 ```
+
+Apres build, Express sert aussi le frontend React depuis le port `4000`.
 
 ## Endpoints
 
@@ -49,6 +69,21 @@ curl http://127.0.0.1:4000/health
 curl http://127.0.0.1:4000/api/polymarket/status
 curl http://127.0.0.1:4000/api/polymarket/markets
 curl http://127.0.0.1:4000/api/polymarket/ws-test
+```
+
+WebSocket backend:
+
+```text
+ws://127.0.0.1:4000/ws/polymarket
+```
+
+Le navigateur envoie:
+
+```json
+{
+  "type": "subscribe",
+  "assetIds": ["<clob_token_id>"]
+}
 ```
 
 ## Deploiement VPS avec PM2
@@ -62,11 +97,8 @@ pm2 status
 pm2 logs black-goat
 ```
 
-Pour tester depuis le VPS:
+Commande PM2:
 
 ```bash
-curl http://127.0.0.1:4000/health
-curl http://127.0.0.1:4000/api/polymarket/status
-curl http://127.0.0.1:4000/api/polymarket/markets
-curl http://127.0.0.1:4000/api/polymarket/ws-test
+pm2 start dist/index.js --name black-goat --update-env
 ```
