@@ -15,12 +15,28 @@ const POLYMARKET_MARKET_LIMIT = readNumberEnv("POLYMARKET_MARKET_LIMIT", 8);
 const POLYMARKET_API_BASE = stripTrailingSlash(
   process.env.POLYMARKET_API_BASE ?? "https://gamma-api.polymarket.com",
 );
+const POLYMARKET_DATA_API_BASE = stripTrailingSlash(
+  process.env.POLYMARKET_DATA_API_BASE ?? "https://data-api.polymarket.com",
+);
 const POLYMARKET_WS_URL =
   process.env.POLYMARKET_WS_URL ?? "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const POLYMARKET_REQUEST_TIMEOUT_MS = readNumberEnv("POLYMARKET_REQUEST_TIMEOUT_MS", 10_000);
 const POLYMARKET_WS_TIMEOUT_MS = readNumberEnv("POLYMARKET_WS_TIMEOUT_MS", 10_000);
+const POLYMARKET_TRADES_FETCH_LIMIT = readNumberEnv("POLYMARKET_TRADES_FETCH_LIMIT", 500);
+const POLYMARKET_TRADES_POLL_MS = readNumberEnv("POLYMARKET_TRADES_POLL_MS", 5_000);
 const CLIENT_WS_PATH = "/ws/polymarket";
+const TRADERS_WS_PATH = "/ws/traders";
 const MAX_WS_ASSET_IDS = 80;
+const DATA_SOURCE_REAL = "REAL POLYMARKET DATA";
+const DATA_SOURCE_UNAVAILABLE = "UNAVAILABLE";
+
+const PERIOD_SECONDS = {
+  "5m": 5 * 60,
+  "15m": 15 * 60,
+  "1h": 60 * 60,
+  "4h": 4 * 60 * 60,
+  "24h": 24 * 60 * 60,
+} as const;
 
 if (MODE !== "TEST") {
   throw new Error("BLACK-GOAT only supports MODE=TEST for this read-only viewer.");
@@ -64,6 +80,9 @@ type FetchJsonResult<T> = {
   status: number;
 };
 
+type PeriodKey = keyof typeof PERIOD_SECONDS;
+type DataSourceStatus = typeof DATA_SOURCE_REAL | typeof DATA_SOURCE_UNAVAILABLE;
+
 type ClientMessage = {
   type?: unknown;
   assetIds?: unknown;
@@ -85,9 +104,96 @@ type LivePriceUpdate = {
   time: string;
 };
 
+type DataApiTrade = {
+  proxyWallet?: unknown;
+  side?: unknown;
+  asset?: unknown;
+  conditionId?: unknown;
+  size?: unknown;
+  price?: unknown;
+  timestamp?: unknown;
+  title?: unknown;
+  slug?: unknown;
+  icon?: unknown;
+  eventSlug?: unknown;
+  outcome?: unknown;
+  outcomeIndex?: unknown;
+  name?: unknown;
+  pseudonym?: unknown;
+  bio?: unknown;
+  profileImage?: unknown;
+  profileImageOptimized?: unknown;
+  transactionHash?: unknown;
+};
+
+type PublicProfile = {
+  createdAt?: unknown;
+  proxyWallet?: unknown;
+  profileImage?: unknown;
+  displayUsernamePublic?: unknown;
+  bio?: unknown;
+  pseudonym?: unknown;
+  name?: unknown;
+  xUsername?: unknown;
+  verifiedBadge?: unknown;
+};
+
+type NormalizedTrade = {
+  id: string;
+  wallet: string | null;
+  trader: string | null;
+  username: string | null;
+  pseudonym: string | null;
+  side: string | null;
+  asset: string | null;
+  conditionId: string | null;
+  marketTitle: string | null;
+  marketSlug: string | null;
+  eventSlug: string | null;
+  outcome: string | null;
+  outcomeIndex: number | null;
+  size: number | null;
+  price: number | null;
+  amount: number | null;
+  amountSource: "DERIVED_FROM_REAL_SIZE_PRICE" | typeof DATA_SOURCE_UNAVAILABLE;
+  timestamp: number | null;
+  time: string | null;
+  transactionHash: string | null;
+  profileUrl: string | null;
+  marketUrl: string | null;
+  dataSourceStatus: DataSourceStatus;
+};
+
+type TraderScores = {
+  activityScore: number | null;
+  volumeScore: number | null;
+  consistencyScore: number | null;
+  riskPlaceholder: null;
+  overallScore: number | null;
+  disclaimer: string;
+};
+
+type ActiveTrader = {
+  id: string;
+  wallet: string;
+  username: string | null;
+  pseudonym: string | null;
+  volumeRecent: number;
+  tradesRecent: number;
+  lastActivity: string | null;
+  market: string | null;
+  outcome: string | null;
+  price: number | null;
+  amount: number | null;
+  profileUrl: string;
+  dataSourceStatus: DataSourceStatus;
+  scores: TraderScores;
+};
+
 const app = express();
 const server = createServer(app);
 const clientWss = new WebSocketServer({ noServer: true });
+const tradersWss = new WebSocketServer({ noServer: true });
 
 app.disable("x-powered-by");
 app.use(express.json());
@@ -173,6 +279,141 @@ app.get("/api/polymarket/ws-test", async (_req, res) => {
   }
 });
 
+app.get("/api/polymarket/traders/active", async (req, res) => {
+  try {
+    const period = readPeriod(req.query.period);
+    const sort = readTraderSort(req.query.sort);
+    const search = readQueryString(req.query.search);
+    const limit = readLimit(req.query.limit, 50, 100);
+    const result = await fetchDataApiTrades(POLYMARKET_TRADES_FETCH_LIMIT);
+    const trades = filterTradesByPeriod(result.data.map(normalizeTrade), period);
+    const traders = buildActiveTraders(trades, sort, search).slice(0, limit);
+
+    res.json({
+      ok: true,
+      appName: APP_NAME,
+      mode: MODE,
+      dataSourceStatus: DATA_SOURCE_REAL,
+      source: result.endpoint,
+      period,
+      count: traders.length,
+      traders,
+      limitations: [
+        "Active traders are derived from the public Polymarket Data API /trades response.",
+        "Fields not returned by Polymarket are null or unavailable.",
+        "Scores are read-only analytical indicators, not financial advice.",
+      ],
+      time: new Date().toISOString(),
+    });
+  } catch (error) {
+    sendError(res, "Polymarket active traders request failed.", error);
+  }
+});
+
+app.get("/api/polymarket/traders/:id", async (req, res) => {
+  try {
+    const wallet = req.params.id;
+    if (!isWalletAddress(wallet)) {
+      res.status(400).json({
+        ok: false,
+        appName: APP_NAME,
+        mode: MODE,
+        message: "Trader id must be a 0x wallet address.",
+        dataSourceStatus: DATA_SOURCE_UNAVAILABLE,
+        time: new Date().toISOString(),
+      });
+      return;
+    }
+
+    const period = readPeriod(req.query.period, "24h");
+    const [tradesResult, profileResult] = await Promise.all([
+      fetchDataApiTrades(readLimit(req.query.limit, 200, 500), wallet),
+      fetchPublicProfile(wallet),
+    ]);
+    const allTrades = tradesResult.data.map(normalizeTrade);
+    const recentTrades = filterTradesByPeriod(allTrades, period);
+    const profile = normalizeProfile(profileResult.profile, wallet);
+    const volumeRecent = sumTradeVolume(recentTrades);
+    const marketsMostTraded = buildMostTradedMarkets(recentTrades);
+    const lastTrade = recentTrades[0] ?? allTrades[0] ?? null;
+    const dataInsufficient = allTrades.length === 0;
+
+    res.json({
+      ok: true,
+      appName: APP_NAME,
+      mode: MODE,
+      dataSourceStatus: dataInsufficient ? DATA_SOURCE_UNAVAILABLE : DATA_SOURCE_REAL,
+      profileDataSourceStatus: profileResult.dataSourceStatus,
+      trader: {
+        wallet,
+        username: profile.username ?? lastTrade?.username ?? null,
+        pseudonym: profile.pseudonym ?? lastTrade?.pseudonym ?? null,
+        bio: profile.bio,
+        profileImage: profile.profileImage,
+        xUsername: profile.xUsername,
+        verifiedBadge: profile.verifiedBadge,
+        createdAt: profile.createdAt,
+        profileUrl: buildProfileUrl(wallet),
+      },
+      summary: dataInsufficient
+        ? {
+            message: "Donnees insuffisantes",
+            volumeRecent: null,
+            tradesRecent: 0,
+            lastActivity: null,
+            activityRecent: null,
+            scores: emptyScores(),
+          }
+        : {
+            message: null,
+            period,
+            volumeRecent,
+            tradesRecent: recentTrades.length,
+            lastActivity: lastTrade?.time ?? null,
+            activityRecent: recentTrades.length > 0 ? "REAL POLYMARKET DATA" : DATA_SOURCE_UNAVAILABLE,
+            scores: calculateScores(recentTrades, volumeRecent, volumeRecent),
+          },
+      latestTrades: recentTrades.slice(0, 50),
+      marketsMostTraded,
+      limitations: [
+        "Trader profile and trades come from public Polymarket endpoints only.",
+        "No wallet, private key, order, or trading endpoint is used.",
+        "If Polymarket does not expose a field, BLACK-GOAT returns null/unavailable.",
+      ],
+      time: new Date().toISOString(),
+    });
+  } catch (error) {
+    sendError(res, "Polymarket trader profile request failed.", error);
+  }
+});
+
+app.get("/api/polymarket/trades/live", async (req, res) => {
+  try {
+    const period = readPeriod(req.query.period);
+    const limit = readLimit(req.query.limit, 100, 250);
+    const result = await fetchDataApiTrades(POLYMARKET_TRADES_FETCH_LIMIT);
+    const trades = filterTradesByPeriod(result.data.map(normalizeTrade), period).slice(0, limit);
+
+    res.json({
+      ok: true,
+      appName: APP_NAME,
+      mode: MODE,
+      dataSourceStatus: DATA_SOURCE_REAL,
+      source: result.endpoint,
+      period,
+      count: trades.length,
+      trades,
+      limitations: [
+        "Live tape uses public Data API polling because a public trader WebSocket with wallet-level trade data is not documented.",
+        "No simulated trades are generated.",
+      ],
+      time: new Date().toISOString(),
+    });
+  } catch (error) {
+    sendError(res, "Polymarket live trades request failed.", error);
+  }
+});
+
 setupStaticFrontend();
 setupClientWebSocket();
 
@@ -189,6 +430,72 @@ async function fetchPolymarketMarkets(limit: number): Promise<FetchJsonResult<Ga
   url.searchParams.set("limit", String(limit));
 
   return fetchJson<GammaMarket[]>(url);
+}
+
+async function fetchDataApiTrades(limit: number, user?: string): Promise<FetchJsonResult<DataApiTrade[]>> {
+  const url = new URL("/trades", POLYMARKET_DATA_API_BASE);
+  url.searchParams.set("limit", String(Math.min(Math.max(Math.trunc(limit), 1), 10_000)));
+  url.searchParams.set("takerOnly", "false");
+
+  if (user !== undefined) {
+    url.searchParams.set("user", user);
+  }
+
+  return fetchJson<DataApiTrade[]>(url);
+}
+
+async function fetchPublicProfile(address: string): Promise<{
+  profile: PublicProfile | null;
+  dataSourceStatus: DataSourceStatus;
+  endpoint: string;
+  latencyMs: number | null;
+}> {
+  const url = new URL("/public-profile", POLYMARKET_API_BASE);
+  url.searchParams.set("address", address);
+  const startedAt = Date.now();
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        accept: "application/json",
+        "user-agent": `${APP_NAME}/0.3.0 TEST`,
+      },
+      signal: AbortSignal.timeout(POLYMARKET_REQUEST_TIMEOUT_MS),
+    });
+    const latencyMs = Date.now() - startedAt;
+
+    if (response.status === 404) {
+      return {
+        profile: null,
+        dataSourceStatus: DATA_SOURCE_UNAVAILABLE,
+        endpoint: url.toString(),
+        latencyMs,
+      };
+    }
+
+    if (!response.ok) {
+      return {
+        profile: null,
+        dataSourceStatus: DATA_SOURCE_UNAVAILABLE,
+        endpoint: url.toString(),
+        latencyMs,
+      };
+    }
+
+    return {
+      profile: (await response.json()) as PublicProfile,
+      dataSourceStatus: DATA_SOURCE_REAL,
+      endpoint: url.toString(),
+      latencyMs,
+    };
+  } catch {
+    return {
+      profile: null,
+      dataSourceStatus: DATA_SOURCE_UNAVAILABLE,
+      endpoint: url.toString(),
+      latencyMs: null,
+    };
+  }
 }
 
 async function fetchJson<T>(url: URL): Promise<FetchJsonResult<T>> {
@@ -217,16 +524,25 @@ async function fetchJson<T>(url: URL): Promise<FetchJsonResult<T>> {
 
 function setupClientWebSocket() {
   server.on("upgrade", (request, socket, head) => {
-    const pathname = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`).pathname;
+    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+    const pathname = url.pathname;
 
-    if (pathname !== CLIENT_WS_PATH) {
-      socket.destroy();
+    if (pathname === CLIENT_WS_PATH) {
+      clientWss.handleUpgrade(request, socket, head, (client) => {
+        clientWss.emit("connection", client, request);
+      });
       return;
     }
 
-    clientWss.handleUpgrade(request, socket, head, (client) => {
-      clientWss.emit("connection", client, request);
-    });
+    if (pathname === TRADERS_WS_PATH) {
+      tradersWss.handleUpgrade(request, socket, head, (client) => {
+        tradersWss.emit("connection", client, request);
+        attachTradersRelay(client, readPeriod(url.searchParams.get("period")));
+      });
+      return;
+    }
+
+      socket.destroy();
   });
 
   clientWss.on("connection", (client) => {
@@ -406,6 +722,98 @@ function attachPolymarketRelay(client: WebSocket) {
   }
 }
 
+function attachTradersRelay(client: WebSocket, period: PeriodKey) {
+  let closed = false;
+  let polling = false;
+  let snapshotSent = false;
+  let timer: NodeJS.Timeout | undefined;
+  const seenTradeIds = new Set<string>();
+
+  sendClient(client, {
+    type: "status",
+    status: "OFFLINE",
+    dataSourceStatus: DATA_SOURCE_UNAVAILABLE,
+    transport: "POLLING_PUBLIC_DATA_API",
+    message: "Waiting for first public trades poll.",
+    period,
+    time: new Date().toISOString(),
+  });
+
+  const poll = async () => {
+    if (closed || polling) {
+      return;
+    }
+
+    polling = true;
+    const startedAt = Date.now();
+
+    try {
+      const result = await fetchDataApiTrades(Math.min(POLYMARKET_TRADES_FETCH_LIMIT, 300));
+      const trades = filterTradesByPeriod(result.data.map(normalizeTrade), period).slice(0, 50);
+      const isSnapshot = !snapshotSent;
+      const payloadTrades = isSnapshot ? trades : trades.filter((trade) => !seenTradeIds.has(trade.id));
+
+      for (const trade of trades) {
+        seenTradeIds.add(trade.id);
+      }
+
+      if (seenTradeIds.size > 2_000) {
+        seenTradeIds.clear();
+        for (const trade of trades) {
+          seenTradeIds.add(trade.id);
+        }
+      }
+
+      snapshotSent = true;
+      sendClient(client, {
+        type: "status",
+        status: "LIVE",
+        dataSourceStatus: DATA_SOURCE_REAL,
+        transport: "POLLING_PUBLIC_DATA_API",
+        latencyMs: Date.now() - startedAt,
+        period,
+        time: new Date().toISOString(),
+      });
+
+      if (payloadTrades.length > 0) {
+        sendClient(client, {
+          type: "trades",
+          snapshot: isSnapshot,
+          dataSourceStatus: DATA_SOURCE_REAL,
+          period,
+          count: payloadTrades.length,
+          trades: payloadTrades,
+          time: new Date().toISOString(),
+        });
+      }
+    } catch (error) {
+      sendClient(client, {
+        type: "status",
+        status: "OFFLINE",
+        dataSourceStatus: DATA_SOURCE_UNAVAILABLE,
+        transport: "POLLING_PUBLIC_DATA_API",
+        message: error instanceof Error ? error.message : String(error),
+        period,
+        time: new Date().toISOString(),
+      });
+    } finally {
+      polling = false;
+    }
+  };
+
+  void poll();
+  timer = setInterval(() => {
+    void poll();
+  }, POLYMARKET_TRADES_POLL_MS);
+
+  client.on("close", () => {
+    closed = true;
+    if (timer !== undefined) {
+      clearInterval(timer);
+    }
+  });
+}
+
 function normalizeMarket(market: GammaMarket): PublicMarket {
   return {
     id: market.id === undefined ? null : String(market.id),
@@ -421,6 +829,275 @@ function normalizeMarket(market: GammaMarket): PublicMarket {
     closed: market.closed ?? null,
     acceptingOrders: market.acceptingOrders ?? null,
   };
+}
+
+function normalizeTrade(trade: DataApiTrade): NormalizedTrade {
+  const wallet = readString(trade.proxyWallet);
+  const username = readString(trade.name);
+  const pseudonym = readString(trade.pseudonym);
+  const size = parseNumber(trade.size);
+  const price = parseNumber(trade.price);
+  const amount = size === null || price === null ? null : size * price;
+  const timestampMs = parseTimestamp(trade.timestamp);
+  const timestamp = timestampMs === null ? null : Math.floor(timestampMs / 1_000);
+  const marketSlug = readString(trade.slug);
+  const eventSlug = readString(trade.eventSlug);
+  const marketTitle = readString(trade.title);
+  const conditionId = readString(trade.conditionId);
+  const asset = readString(trade.asset);
+  const side = readString(trade.side);
+  const outcome = readString(trade.outcome);
+  const outcomeIndex = parseNumber(trade.outcomeIndex);
+  const transactionHash = readString(trade.transactionHash);
+  const fallbackId = [
+    wallet,
+    asset,
+    side,
+    outcome,
+    size?.toString() ?? "",
+    price?.toString() ?? "",
+    timestamp?.toString() ?? "",
+  ].join(":");
+
+  return {
+    id: transactionHash === null ? fallbackId : `${transactionHash}:${wallet ?? "unknown"}:${asset ?? "asset"}:${outcomeIndex ?? "outcome"}`,
+    wallet,
+    trader: username ?? pseudonym ?? wallet,
+    username,
+    pseudonym,
+    side,
+    asset,
+    conditionId,
+    marketTitle,
+    marketSlug,
+    eventSlug,
+    outcome,
+    outcomeIndex: outcomeIndex === null ? null : Math.trunc(outcomeIndex),
+    size,
+    price,
+    amount,
+    amountSource: amount === null ? DATA_SOURCE_UNAVAILABLE : "DERIVED_FROM_REAL_SIZE_PRICE",
+    timestamp,
+    time: timestampMs === null ? null : new Date(timestampMs).toISOString(),
+    transactionHash,
+    profileUrl: wallet === null ? null : buildProfileUrl(wallet),
+    marketUrl: buildMarketUrl(eventSlug ?? marketSlug),
+    dataSourceStatus: DATA_SOURCE_REAL,
+  };
+}
+
+function normalizeProfile(profile: PublicProfile | null, fallbackWallet: string) {
+  const displayUsernamePublic = profile?.displayUsernamePublic !== false;
+
+  return {
+    wallet: readString(profile?.proxyWallet) ?? fallbackWallet,
+    username: displayUsernamePublic ? readString(profile?.name) : null,
+    pseudonym: readString(profile?.pseudonym),
+    bio: readString(profile?.bio),
+    profileImage: readString(profile?.profileImage),
+    xUsername: readString(profile?.xUsername),
+    verifiedBadge: typeof profile?.verifiedBadge === "boolean" ? profile.verifiedBadge : null,
+    createdAt: readString(profile?.createdAt),
+  };
+}
+
+function filterTradesByPeriod(trades: NormalizedTrade[], period: PeriodKey): NormalizedTrade[] {
+  const cutoff = Math.floor(Date.now() / 1_000) - PERIOD_SECONDS[period];
+
+  return trades
+    .filter((trade) => trade.timestamp !== null && trade.timestamp >= cutoff)
+    .sort((left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0));
+}
+
+function buildActiveTraders(
+  trades: NormalizedTrade[],
+  sort: "volume" | "trades" | "activity",
+  search: string | null,
+): ActiveTrader[] {
+  const grouped = new Map<
+    string,
+    {
+      wallet: string;
+      username: string | null;
+      pseudonym: string | null;
+      trades: NormalizedTrade[];
+      volumeRecent: number;
+      lastTrade: NormalizedTrade;
+    }
+  >();
+
+  for (const trade of trades) {
+    if (trade.wallet === null) {
+      continue;
+    }
+
+    const current = grouped.get(trade.wallet);
+    if (current === undefined) {
+      grouped.set(trade.wallet, {
+        wallet: trade.wallet,
+        username: trade.username,
+        pseudonym: trade.pseudonym,
+        trades: [trade],
+        volumeRecent: trade.amount ?? 0,
+        lastTrade: trade,
+      });
+      continue;
+    }
+
+    current.trades.push(trade);
+    current.volumeRecent += trade.amount ?? 0;
+    if ((trade.timestamp ?? 0) > (current.lastTrade.timestamp ?? 0)) {
+      current.lastTrade = trade;
+      current.username = current.username ?? trade.username;
+      current.pseudonym = current.pseudonym ?? trade.pseudonym;
+    }
+  }
+
+  const maxVolume = Math.max(0, ...Array.from(grouped.values()).map((item) => item.volumeRecent));
+  const normalizedSearch = search?.toLowerCase() ?? null;
+  const traders = Array.from(grouped.values()).map((item) => ({
+    id: item.wallet,
+    wallet: item.wallet,
+    username: item.username,
+    pseudonym: item.pseudonym,
+    volumeRecent: item.volumeRecent,
+    tradesRecent: item.trades.length,
+    lastActivity: item.lastTrade.time,
+    market: item.lastTrade.marketTitle,
+    outcome: item.lastTrade.outcome,
+    price: item.lastTrade.price,
+    amount: item.lastTrade.amount,
+    profileUrl: buildProfileUrl(item.wallet),
+    dataSourceStatus: DATA_SOURCE_REAL as DataSourceStatus,
+    scores: calculateScores(item.trades, item.volumeRecent, maxVolume),
+  }));
+
+  const filtered = normalizedSearch === null
+    ? traders
+    : traders.filter((trader) =>
+        [trader.wallet, trader.username, trader.pseudonym]
+          .filter((value): value is string => value !== null)
+          .some((value) => value.toLowerCase().includes(normalizedSearch)),
+      );
+
+  return filtered.sort((left, right) => {
+    if (sort === "trades") {
+      return right.tradesRecent - left.tradesRecent;
+    }
+
+    if (sort === "activity") {
+      return new Date(right.lastActivity ?? 0).getTime() - new Date(left.lastActivity ?? 0).getTime();
+    }
+
+    return right.volumeRecent - left.volumeRecent;
+  });
+}
+
+function buildMostTradedMarkets(trades: NormalizedTrade[]) {
+  const grouped = new Map<
+    string,
+    {
+      conditionId: string | null;
+      marketTitle: string | null;
+      marketSlug: string | null;
+      marketUrl: string | null;
+      trades: number;
+      volume: number;
+      lastActivity: string | null;
+    }
+  >();
+
+  for (const trade of trades) {
+    const key = trade.conditionId ?? trade.marketSlug ?? trade.marketTitle ?? "unknown";
+    const current = grouped.get(key);
+
+    if (current === undefined) {
+      grouped.set(key, {
+        conditionId: trade.conditionId,
+        marketTitle: trade.marketTitle,
+        marketSlug: trade.marketSlug,
+        marketUrl: trade.marketUrl,
+        trades: 1,
+        volume: trade.amount ?? 0,
+        lastActivity: trade.time,
+      });
+      continue;
+    }
+
+    current.trades += 1;
+    current.volume += trade.amount ?? 0;
+    if (new Date(trade.time ?? 0).getTime() > new Date(current.lastActivity ?? 0).getTime()) {
+      current.lastActivity = trade.time;
+    }
+  }
+
+  return Array.from(grouped.values())
+    .sort((left, right) => right.volume - left.volume || right.trades - left.trades)
+    .slice(0, 10);
+}
+
+function calculateScores(trades: NormalizedTrade[], volume: number, maxVolume: number): TraderScores {
+  if (trades.length === 0) {
+    return emptyScores();
+  }
+
+  const activityScore = clampScore(trades.length * 8);
+  const volumeScore = maxVolume > 0 ? clampScore((volume / maxVolume) * 100) : null;
+  const timestampBuckets = new Set(
+    trades
+      .map((trade) => trade.timestamp)
+      .filter((timestamp): timestamp is number => timestamp !== null)
+      .map((timestamp) => Math.floor(timestamp / 300)),
+  );
+  const consistencyScore =
+    timestampBuckets.size === 0
+      ? null
+      : trades.length === 1
+        ? 20
+        : clampScore((timestampBuckets.size / Math.min(trades.length, 12)) * 100);
+  const availableScores = [activityScore, volumeScore, consistencyScore].filter(
+    (score): score is number => score !== null,
+  );
+  const overallScore =
+    availableScores.length === 0
+      ? null
+      : Math.round(availableScores.reduce((total, score) => total + score, 0) / availableScores.length);
+
+  return {
+    activityScore,
+    volumeScore,
+    consistencyScore,
+    riskPlaceholder: null,
+    overallScore,
+    disclaimer: "Score analytique indicatif en lecture seule, pas un conseil financier.",
+  };
+}
+
+function emptyScores(): TraderScores {
+  return {
+    activityScore: null,
+    volumeScore: null,
+    consistencyScore: null,
+    riskPlaceholder: null,
+    overallScore: null,
+    disclaimer: "Score analytique indicatif en lecture seule, pas un conseil financier.",
+  };
+}
+
+function clampScore(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function sumTradeVolume(trades: NormalizedTrade[]): number {
+  return trades.reduce((total, trade) => total + (trade.amount ?? 0), 0);
+}
+
+function buildProfileUrl(wallet: string): string {
+  return `https://polymarket.com/profile/${wallet}`;
+}
+
+function buildMarketUrl(slug: string | null): string | null {
+  return slug === null ? null : `https://polymarket.com/event/${slug}`;
 }
 
 function testPolymarketWebSocket(assetIds: string[]) {
@@ -766,7 +1443,7 @@ function readNumberEnv(name: string, fallback: number): number {
   return value;
 }
 
-function readLimit(value: unknown, fallback: number): number {
+function readLimit(value: unknown, fallback: number, max = 50): number {
   const rawValue = Array.isArray(value) ? value[0] : value;
   const parsed = parseNumber(rawValue);
 
@@ -774,7 +1451,36 @@ function readLimit(value: unknown, fallback: number): number {
     return fallback;
   }
 
-  return Math.min(Math.max(Math.trunc(parsed), 1), 50);
+  return Math.min(Math.max(Math.trunc(parsed), 1), max);
+}
+
+function readPeriod(value: unknown, fallback: PeriodKey = "15m"): PeriodKey {
+  const rawValue = readQueryString(value);
+
+  if (rawValue !== null && rawValue in PERIOD_SECONDS) {
+    return rawValue as PeriodKey;
+  }
+
+  return fallback;
+}
+
+function readTraderSort(value: unknown): "volume" | "trades" | "activity" {
+  const rawValue = readQueryString(value);
+
+  if (rawValue === "trades" || rawValue === "activity") {
+    return rawValue;
+  }
+
+  return "volume";
+}
+
+function readQueryString(value: unknown): string | null {
+  const rawValue = Array.isArray(value) ? value[0] : value;
+  return readString(rawValue);
+}
+
+function isWalletAddress(value: unknown): value is string {
+  return typeof value === "string" && /^0x[a-fA-F0-9]{40}$/.test(value);
 }
 
 function stripTrailingSlash(value: string): string {

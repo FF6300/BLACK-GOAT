@@ -7,6 +7,8 @@ Objectif actuel:
 - afficher quelques marches publics Polymarket
 - recevoir les prix en live via le WebSocket backend
 - afficher LIVE / OFFLINE et la latence
+- afficher les traders actifs visibles dans les trades publics
+- afficher un live trading tape public
 - ne faire aucun trading
 - ne faire aucune simulation
 - ne stocker aucune donnee en DB
@@ -33,6 +35,8 @@ MODE=TEST
 HOST=0.0.0.0
 PORT=4000
 POLYMARKET_MARKET_LIMIT=8
+POLYMARKET_TRADES_FETCH_LIMIT=500
+POLYMARKET_TRADES_POLL_MS=5000
 ```
 
 ## Developpement
@@ -69,12 +73,16 @@ curl http://127.0.0.1:4000/health
 curl http://127.0.0.1:4000/api/polymarket/status
 curl http://127.0.0.1:4000/api/polymarket/markets
 curl http://127.0.0.1:4000/api/polymarket/ws-test
+curl "http://127.0.0.1:4000/api/polymarket/traders/active?period=15m&sort=volume"
+curl "http://127.0.0.1:4000/api/polymarket/trades/live?period=15m"
+curl "http://127.0.0.1:4000/api/polymarket/traders/<wallet>?period=24h"
 ```
 
-WebSocket backend:
+WebSockets backend:
 
 ```text
 ws://127.0.0.1:4000/ws/polymarket
+ws://127.0.0.1:4000/ws/traders?period=15m
 ```
 
 Le navigateur envoie:
@@ -85,6 +93,8 @@ Le navigateur envoie:
   "assetIds": ["<clob_token_id>"]
 }
 ```
+
+`/ws/traders` utilise un polling backend de l'API publique Polymarket Data API `/trades`, puis pousse les nouveaux trades au navigateur. Les donnees non exposees par Polymarket restent `null` ou `unavailable`.
 
 ## Deploiement VPS avec PM2
 
