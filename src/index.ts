@@ -82,6 +82,7 @@ type FetchJsonResult<T> = {
 
 type PeriodKey = keyof typeof PERIOD_SECONDS;
 type DataSourceStatus = typeof DATA_SOURCE_REAL | typeof DATA_SOURCE_UNAVAILABLE;
+type TraderSort = "volume" | "trades" | "activity" | "score";
 
 type ClientMessage = {
   type?: unknown;
@@ -284,10 +285,17 @@ app.get("/api/polymarket/traders/active", async (req, res) => {
     const period = readPeriod(req.query.period);
     const sort = readTraderSort(req.query.sort);
     const search = readQueryString(req.query.search);
+    const minVolume = readMinimumNumber(req.query.minVolume);
+    const minTrades = readMinimumNumber(req.query.minTrades);
     const limit = readLimit(req.query.limit, 50, 100);
     const result = await fetchDataApiTrades(POLYMARKET_TRADES_FETCH_LIMIT);
     const trades = filterTradesByPeriod(result.data.map(normalizeTrade), period);
-    const traders = buildActiveTraders(trades, sort, search).slice(0, limit);
+    const traders = buildActiveTraders(trades, {
+      minTrades,
+      minVolume,
+      search,
+      sort,
+    }).slice(0, limit);
 
     res.json({
       ok: true,
@@ -296,6 +304,12 @@ app.get("/api/polymarket/traders/active", async (req, res) => {
       dataSourceStatus: DATA_SOURCE_REAL,
       source: result.endpoint,
       period,
+      filters: {
+        search,
+        minVolume,
+        minTrades,
+        sort,
+      },
       count: traders.length,
       traders,
       limitations: [
@@ -335,6 +349,7 @@ app.get("/api/polymarket/traders/:id", async (req, res) => {
     const profile = normalizeProfile(profileResult.profile, wallet);
     const volumeRecent = sumTradeVolume(recentTrades);
     const marketsMostTraded = buildMostTradedMarkets(recentTrades);
+    const outcomesTraded = buildOutcomesTraded(recentTrades);
     const lastTrade = recentTrades[0] ?? allTrades[0] ?? null;
     const dataInsufficient = allTrades.length === 0;
 
@@ -375,6 +390,7 @@ app.get("/api/polymarket/traders/:id", async (req, res) => {
           },
       latestTrades: recentTrades.slice(0, 50),
       marketsMostTraded,
+      outcomesTraded,
       limitations: [
         "Trader profile and trades come from public Polymarket endpoints only.",
         "No wallet, private key, order, or trading endpoint is used.",
@@ -911,8 +927,12 @@ function filterTradesByPeriod(trades: NormalizedTrade[], period: PeriodKey): Nor
 
 function buildActiveTraders(
   trades: NormalizedTrade[],
-  sort: "volume" | "trades" | "activity",
-  search: string | null,
+  filters: {
+    minTrades: number | null;
+    minVolume: number | null;
+    search: string | null;
+    sort: TraderSort;
+  },
 ): ActiveTrader[] {
   const grouped = new Map<
     string,
@@ -954,7 +974,7 @@ function buildActiveTraders(
   }
 
   const maxVolume = Math.max(0, ...Array.from(grouped.values()).map((item) => item.volumeRecent));
-  const normalizedSearch = search?.toLowerCase() ?? null;
+  const normalizedSearch = filters.search?.toLowerCase() ?? null;
   const traders = Array.from(grouped.values()).map((item) => ({
     id: item.wallet,
     wallet: item.wallet,
@@ -972,25 +992,46 @@ function buildActiveTraders(
     scores: calculateScores(item.trades, item.volumeRecent, maxVolume),
   }));
 
-  const filtered = normalizedSearch === null
-    ? traders
-    : traders.filter((trader) =>
-        [trader.wallet, trader.username, trader.pseudonym]
-          .filter((value): value is string => value !== null)
-          .some((value) => value.toLowerCase().includes(normalizedSearch)),
-      );
+  const filtered = traders.filter((trader) => {
+    if (filters.minVolume !== null && trader.volumeRecent < filters.minVolume) {
+      return false;
+    }
+
+    if (filters.minTrades !== null && trader.tradesRecent < filters.minTrades) {
+      return false;
+    }
+
+    if (normalizedSearch !== null && !traderMatchesSearch(trader, normalizedSearch)) {
+      return false;
+    }
+
+    return true;
+  });
 
   return filtered.sort((left, right) => {
-    if (sort === "trades") {
+    if (filters.sort === "trades") {
       return right.tradesRecent - left.tradesRecent;
     }
 
-    if (sort === "activity") {
+    if (filters.sort === "activity") {
       return new Date(right.lastActivity ?? 0).getTime() - new Date(left.lastActivity ?? 0).getTime();
+    }
+
+    if (filters.sort === "score") {
+      return (right.scores.overallScore ?? -1) - (left.scores.overallScore ?? -1);
     }
 
     return right.volumeRecent - left.volumeRecent;
   });
+}
+
+function traderMatchesSearch(
+  trader: Pick<ActiveTrader, "pseudonym" | "username" | "wallet">,
+  normalizedSearch: string,
+): boolean {
+  return [trader.wallet, trader.username, trader.pseudonym]
+    .filter((value): value is string => value !== null)
+    .some((value) => value.toLowerCase().includes(normalizedSearch));
 }
 
 function buildMostTradedMarkets(trades: NormalizedTrade[]) {
@@ -1033,6 +1074,43 @@ function buildMostTradedMarkets(trades: NormalizedTrade[]) {
 
   return Array.from(grouped.values())
     .sort((left, right) => right.volume - left.volume || right.trades - left.trades)
+    .slice(0, 10);
+}
+
+function buildOutcomesTraded(trades: NormalizedTrade[]) {
+  const grouped = new Map<
+    string,
+    {
+      outcome: string | null;
+      trades: number;
+      volume: number;
+      lastActivity: string | null;
+    }
+  >();
+
+  for (const trade of trades) {
+    const key = trade.outcome ?? "unavailable";
+    const current = grouped.get(key);
+
+    if (current === undefined) {
+      grouped.set(key, {
+        outcome: trade.outcome,
+        trades: 1,
+        volume: trade.amount ?? 0,
+        lastActivity: trade.time,
+      });
+      continue;
+    }
+
+    current.trades += 1;
+    current.volume += trade.amount ?? 0;
+    if (new Date(trade.time ?? 0).getTime() > new Date(current.lastActivity ?? 0).getTime()) {
+      current.lastActivity = trade.time;
+    }
+  }
+
+  return Array.from(grouped.values())
+    .sort((left, right) => right.trades - left.trades || right.volume - left.volume)
     .slice(0, 10);
 }
 
@@ -1464,14 +1542,25 @@ function readPeriod(value: unknown, fallback: PeriodKey = "15m"): PeriodKey {
   return fallback;
 }
 
-function readTraderSort(value: unknown): "volume" | "trades" | "activity" {
+function readTraderSort(value: unknown): TraderSort {
   const rawValue = readQueryString(value);
 
-  if (rawValue === "trades" || rawValue === "activity") {
+  if (rawValue === "trades" || rawValue === "activity" || rawValue === "score") {
     return rawValue;
   }
 
   return "volume";
+}
+
+function readMinimumNumber(value: unknown): number | null {
+  const rawValue = Array.isArray(value) ? value[0] : value;
+  const parsed = parseNumber(rawValue);
+
+  if (parsed === null || parsed < 0) {
+    return null;
+  }
+
+  return parsed;
 }
 
 function readQueryString(value: unknown): string | null {

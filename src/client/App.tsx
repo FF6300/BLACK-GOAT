@@ -2,13 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 type DataSourceStatus = "REAL POLYMARKET DATA" | "UNAVAILABLE";
 type LiveStatus = "CONNECTING" | "LIVE" | "OFFLINE";
-type Tab = "markets" | "traders";
 type PeriodKey = "5m" | "15m" | "1h" | "4h" | "24h";
-type TraderSort = "volume" | "trades" | "activity";
+type Tab = "markets" | "traders";
+type TraderSort = "volume" | "trades" | "activity" | "score";
 
 type MarketResponse = {
-  ok: boolean;
-  count: number;
   markets: PublicMarket[];
   time: string;
 };
@@ -22,9 +20,6 @@ type PublicMarket = {
   clobTokenIds: string[];
   volume24hr: number | null;
   liquidity: number | null;
-  endDate: string | null;
-  active: boolean | null;
-  closed: boolean | null;
   acceptingOrders: boolean | null;
 };
 
@@ -34,8 +29,6 @@ type LivePrice = {
   price: number | null;
   bestBid: number | null;
   bestAsk: number | null;
-  spread: number | null;
-  side: string | null;
   latencyMs: number | null;
   time: string;
 };
@@ -60,7 +53,6 @@ type ActiveTrader = {
   market: string | null;
   outcome: string | null;
   price: number | null;
-  amount: number | null;
   profileUrl: string;
   dataSourceStatus: DataSourceStatus;
   scores: TraderScores;
@@ -70,48 +62,32 @@ type NormalizedTrade = {
   id: string;
   wallet: string | null;
   trader: string | null;
-  username: string | null;
-  pseudonym: string | null;
   side: string | null;
-  asset: string | null;
-  conditionId: string | null;
   marketTitle: string | null;
-  marketSlug: string | null;
-  eventSlug: string | null;
   outcome: string | null;
-  outcomeIndex: number | null;
   size: number | null;
   price: number | null;
   amount: number | null;
-  amountSource: string;
   timestamp: number | null;
   time: string | null;
-  transactionHash: string | null;
   profileUrl: string | null;
   marketUrl: string | null;
   dataSourceStatus: DataSourceStatus;
 };
 
 type ActiveTradersResponse = {
-  ok: boolean;
   dataSourceStatus: DataSourceStatus;
-  period: PeriodKey;
-  count: number;
   traders: ActiveTrader[];
   time: string;
 };
 
 type LiveTradesResponse = {
-  ok: boolean;
   dataSourceStatus: DataSourceStatus;
-  period: PeriodKey;
-  count: number;
   trades: NormalizedTrade[];
   time: string;
 };
 
 type TraderProfileResponse = {
-  ok: boolean;
   dataSourceStatus: DataSourceStatus;
   profileDataSourceStatus: DataSourceStatus;
   trader: {
@@ -119,32 +95,30 @@ type TraderProfileResponse = {
     username: string | null;
     pseudonym: string | null;
     bio: string | null;
-    profileImage: string | null;
-    xUsername: string | null;
-    verifiedBadge: boolean | null;
-    createdAt: string | null;
     profileUrl: string;
   };
   summary: {
     message: string | null;
-    period?: PeriodKey;
     volumeRecent: number | null;
     tradesRecent: number;
     lastActivity: string | null;
-    activityRecent: string | null;
     scores: TraderScores;
   };
   latestTrades: NormalizedTrade[];
   marketsMostTraded: Array<{
     conditionId: string | null;
     marketTitle: string | null;
-    marketSlug: string | null;
     marketUrl: string | null;
     trades: number;
     volume: number;
     lastActivity: string | null;
   }>;
-  time: string;
+  outcomesTraded?: Array<{
+    outcome: string | null;
+    trades: number;
+    volume: number;
+    lastActivity: string | null;
+  }>;
 };
 
 type ServerMessage = {
@@ -157,8 +131,6 @@ type ServerMessage = {
   price?: unknown;
   bestBid?: unknown;
   bestAsk?: unknown;
-  spread?: unknown;
-  side?: unknown;
   time?: unknown;
   trades?: unknown;
   dataSourceStatus?: unknown;
@@ -168,19 +140,23 @@ const PERIODS: PeriodKey[] = ["5m", "15m", "1h", "4h", "24h"];
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("markets");
+  const [error, setError] = useState<string | null>(null);
+
   const [markets, setMarkets] = useState<PublicMarket[]>([]);
   const [prices, setPrices] = useState<Record<string, LivePrice>>({});
   const [marketStatus, setMarketStatus] = useState<LiveStatus>("CONNECTING");
   const [marketLatencyMs, setMarketLatencyMs] = useState<number | null>(null);
   const [marketLastUpdate, setMarketLastUpdate] = useState<string | null>(null);
   const [marketsLoading, setMarketsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   const [period, setPeriod] = useState<PeriodKey>("15m");
   const [sort, setSort] = useState<TraderSort>("volume");
   const [search, setSearch] = useState("");
+  const [minVolume, setMinVolume] = useState("");
+  const [minTrades, setMinTrades] = useState("");
   const [traders, setTraders] = useState<ActiveTrader[]>([]);
   const [liveTrades, setLiveTrades] = useState<NormalizedTrade[]>([]);
+  const [tapePaused, setTapePaused] = useState(false);
   const [tradersStatus, setTradersStatus] = useState<LiveStatus>("CONNECTING");
   const [tradersLatencyMs, setTradersLatencyMs] = useState<number | null>(null);
   const [tradersDataStatus, setTradersDataStatus] = useState<DataSourceStatus>("UNAVAILABLE");
@@ -221,30 +197,40 @@ export default function App() {
 
     try {
       const query = new URLSearchParams({
+        limit: "80",
         period,
         sort,
-        limit: "80",
       });
+
       if (search.trim().length > 0) {
         query.set("search", search.trim());
       }
+      if (minVolume.trim().length > 0) {
+        query.set("minVolume", minVolume.trim());
+      }
+      if (minTrades.trim().length > 0) {
+        query.set("minTrades", minTrades.trim());
+      }
 
-      const [tradersResponse, tradesResponse] = await Promise.all([
-        fetch(`/api/polymarket/traders/active?${query.toString()}`),
-        fetch(`/api/polymarket/trades/live?period=${period}&limit=120`),
-      ]);
-
-      if (!tradersResponse.ok || !tradesResponse.ok) {
-        throw new Error(`HTTP ${tradersResponse.status}/${tradesResponse.status}`);
+      const tradersResponse = await fetch(`/api/polymarket/traders/active?${query.toString()}`);
+      if (!tradersResponse.ok) {
+        throw new Error(`HTTP ${tradersResponse.status}`);
       }
 
       const tradersPayload = (await tradersResponse.json()) as ActiveTradersResponse;
-      const tradesPayload = (await tradesResponse.json()) as LiveTradesResponse;
-
       setTraders(tradersPayload.traders ?? []);
-      setLiveTrades((current) => mergeTrades(tradesPayload.trades ?? [], current).slice(0, 150));
       setTradersDataStatus(tradersPayload.dataSourceStatus);
       setTradersLastUpdate(tradersPayload.time);
+
+      if (!tapePaused) {
+        const tradesResponse = await fetch(`/api/polymarket/trades/live?period=${period}&limit=50`);
+        if (!tradesResponse.ok) {
+          throw new Error(`HTTP ${tradesResponse.status}`);
+        }
+
+        const tradesPayload = (await tradesResponse.json()) as LiveTradesResponse;
+        setLiveTrades((current) => mergeTrades(tradesPayload.trades ?? [], current).slice(0, 50));
+      }
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : String(caughtError));
       setTradersStatus("OFFLINE");
@@ -252,7 +238,7 @@ export default function App() {
     } finally {
       setTradersLoading(false);
     }
-  }, [period, search, sort]);
+  }, [minTrades, minVolume, period, search, sort, tapePaused]);
 
   useEffect(() => {
     void loadMarkets();
@@ -281,6 +267,7 @@ export default function App() {
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
+
         const payload = (await response.json()) as TraderProfileResponse;
         if (!stopped) {
           setSelectedTrader(payload);
@@ -318,7 +305,7 @@ export default function App() {
       socket = new WebSocket(buildWebSocketUrl("/ws/polymarket"));
 
       socket.addEventListener("open", () => {
-        socket?.send(JSON.stringify({ type: "subscribe", assetIds }));
+        socket?.send(JSON.stringify({ assetIds, type: "subscribe" }));
       });
 
       socket.addEventListener("message", (event) => {
@@ -344,12 +331,6 @@ export default function App() {
           setMarketLatencyMs(price.latencyMs);
           setMarketLastUpdate(price.time);
           setMarketStatus("LIVE");
-          return;
-        }
-
-        if (message.type === "error") {
-          setError(readString(message.message) ?? "Market WebSocket error");
-          setMarketStatus("OFFLINE");
         }
       });
 
@@ -401,9 +382,9 @@ export default function App() {
           return;
         }
 
-        if (message.type === "trades" && Array.isArray(message.trades)) {
+        if (!tapePaused && message.type === "trades" && Array.isArray(message.trades)) {
           const trades = message.trades.filter(isNormalizedTrade);
-          setLiveTrades((current) => mergeTrades(trades, current).slice(0, 150));
+          setLiveTrades((current) => mergeTrades(trades, current).slice(0, 50));
           setTradersDataStatus(readDataSourceStatus(message.dataSourceStatus));
           setTradersLastUpdate(readString(message.time) ?? new Date().toISOString());
         }
@@ -428,7 +409,7 @@ export default function App() {
       }
       socket?.close();
     };
-  }, [period]);
+  }, [period, tapePaused]);
 
   return (
     <main className="shell">
@@ -438,21 +419,21 @@ export default function App() {
           <h1>Polymarket read-only terminal</h1>
         </div>
         <div className="status-stack">
-          <StatusPanel label="Markets WS" status={marketStatus} latencyMs={marketLatencyMs} />
-          <StatusPanel label="Traders WS" status={tradersStatus} latencyMs={tradersLatencyMs} />
+          <StatusPanel label="Markets WS" latencyMs={marketLatencyMs} status={marketStatus} />
+          <StatusPanel label="Traders WS" latencyMs={tradersLatencyMs} status={tradersStatus} />
         </div>
       </header>
 
-      <nav className="tabs" aria-label="Views">
-        <button className={tab === "markets" ? "active" : ""} type="button" onClick={() => setTab("markets")}>
+      <nav aria-label="Views" className="tabs">
+        <button className={tab === "markets" ? "active" : ""} onClick={() => setTab("markets")} type="button">
           Markets
         </button>
-        <button className={tab === "traders" ? "active" : ""} type="button" onClick={() => setTab("traders")}>
+        <button className={tab === "traders" ? "active" : ""} onClick={() => setTab("traders")} type="button">
           Active Traders
         </button>
       </nav>
 
-      {error !== null ? <p className="error">{error}</p> : null}
+      {error !== null ? <p className="error">API unavailable or returned an error: {error}</p> : null}
 
       {tab === "markets" ? (
         <MarketsView
@@ -460,8 +441,8 @@ export default function App() {
           lastUpdate={marketLastUpdate}
           loading={marketsLoading}
           markets={markets}
-          prices={prices}
           onRefresh={loadMarkets}
+          prices={prices}
         />
       ) : (
         <TradersView
@@ -469,16 +450,22 @@ export default function App() {
           lastUpdate={tradersLastUpdate}
           liveTrades={liveTrades}
           loading={tradersLoading}
+          minTrades={minTrades}
+          minVolume={minVolume}
           onRefresh={loadTraderData}
           period={period}
           search={search}
           selectedTrader={selectedTrader}
           selectedTraderId={selectedTraderId}
+          setMinTrades={setMinTrades}
+          setMinVolume={setMinVolume}
           setPeriod={setPeriod}
           setSearch={setSearch}
           setSelectedTraderId={setSelectedTraderId}
           setSort={setSort}
+          setTapePaused={setTapePaused}
           sort={sort}
+          tapePaused={tapePaused}
           traders={traders}
         />
       )}
@@ -486,7 +473,7 @@ export default function App() {
   );
 }
 
-function StatusPanel({ label, status, latencyMs }: { label: string; status: LiveStatus; latencyMs: number | null }) {
+function StatusPanel({ label, latencyMs, status }: { label: string; latencyMs: number | null; status: LiveStatus }) {
   return (
     <div className="status-panel">
       <span className={`status-dot ${status.toLowerCase()}`} />
@@ -514,16 +501,16 @@ function MarketsView({
 }) {
   return (
     <>
-      <section className="summary" aria-label="Market status">
+      <section aria-label="Market status" className="summary">
         <Metric label="Markets" value={loading ? "..." : String(markets.length)} />
         <Metric label="Assets" value={String(assetIds.length)} />
         <Metric label="Last update" value={formatTime(lastUpdate)} />
-        <button type="button" onClick={() => void onRefresh()}>
+        <button onClick={() => void onRefresh()} type="button">
           Refresh
         </button>
       </section>
 
-      <section className="market-list" aria-label="Markets">
+      <section aria-label="Markets" className="market-list">
         {loading ? <p className="empty">Loading markets...</p> : null}
         {!loading && markets.length === 0 ? <p className="empty">No markets returned.</p> : null}
         {markets.map((market, index) => (
@@ -539,32 +526,44 @@ function TradersView({
   lastUpdate,
   liveTrades,
   loading,
+  minTrades,
+  minVolume,
   onRefresh,
   period,
   search,
   selectedTrader,
   selectedTraderId,
+  setMinTrades,
+  setMinVolume,
   setPeriod,
   setSearch,
   setSelectedTraderId,
   setSort,
+  setTapePaused,
   sort,
+  tapePaused,
   traders,
 }: {
   dataSourceStatus: DataSourceStatus;
   lastUpdate: string | null;
   liveTrades: NormalizedTrade[];
   loading: boolean;
+  minTrades: string;
+  minVolume: string;
   onRefresh: () => Promise<void>;
   period: PeriodKey;
   search: string;
   selectedTrader: TraderProfileResponse | null;
   selectedTraderId: string | null;
+  setMinTrades: (value: string) => void;
+  setMinVolume: (value: string) => void;
   setPeriod: (period: PeriodKey) => void;
   setSearch: (search: string) => void;
   setSelectedTraderId: (id: string | null) => void;
   setSort: (sort: TraderSort) => void;
+  setTapePaused: (paused: boolean) => void;
   sort: TraderSort;
+  tapePaused: boolean;
   traders: ActiveTrader[];
 }) {
   return (
@@ -573,9 +572,10 @@ function TradersView({
         <div className="panel-head">
           <div>
             <h2>Active Traders</h2>
-            <p>{dataSourceStatus}</p>
+            <p>Only public Polymarket trades are aggregated. Missing fields stay unavailable.</p>
           </div>
-          <button type="button" onClick={() => void onRefresh()}>
+          <SourceBadge status={dataSourceStatus} />
+          <button onClick={() => void onRefresh()} type="button">
             Refresh
           </button>
         </div>
@@ -584,23 +584,33 @@ function TradersView({
           <label>
             <span>Search</span>
             <input
+              onChange={(event) => setSearch(event.target.value)}
               placeholder="wallet / username"
+              title="Filters by wallet, username, or pseudonym returned by Polymarket."
               type="search"
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
             />
           </label>
           <label>
             <span>Sort</span>
-            <select value={sort} onChange={(event) => setSort(event.target.value as TraderSort)}>
+            <select
+              onChange={(event) => setSort(event.target.value as TraderSort)}
+              title="Sort active traders by one public aggregation field."
+              value={sort}
+            >
               <option value="volume">Volume</option>
+              <option value="activity">Recent activity</option>
               <option value="trades">Trades</option>
-              <option value="activity">Last activity</option>
+              <option value="score">Indicative score</option>
             </select>
           </label>
           <label>
             <span>Period</span>
-            <select value={period} onChange={(event) => setPeriod(event.target.value as PeriodKey)}>
+            <select
+              onChange={(event) => setPeriod(event.target.value as PeriodKey)}
+              title="Local time window applied to public trades returned by Polymarket."
+              value={period}
+            >
               {PERIODS.map((item) => (
                 <option key={item} value={item}>
                   {item}
@@ -608,15 +618,39 @@ function TradersView({
               ))}
             </select>
           </label>
+          <label>
+            <span>Min volume</span>
+            <input
+              min="0"
+              onChange={(event) => setMinVolume(event.target.value)}
+              placeholder="0"
+              title="Minimum derived notional volume: size x price, only when both values are returned."
+              type="number"
+              value={minVolume}
+            />
+          </label>
+          <label>
+            <span>Min trades</span>
+            <input
+              min="0"
+              onChange={(event) => setMinTrades(event.target.value)}
+              placeholder="0"
+              title="Minimum number of public trades observed in the selected period."
+              type="number"
+              value={minTrades}
+            />
+          </label>
           <Metric label="Last update" value={formatTime(lastUpdate)} />
         </div>
 
-        <p className="notice">Scores analytiques indicatifs en lecture seule, pas un conseil financier.</p>
+        <p className="notice">
+          Indicative score is an analytical read-only score. It is not financial advice and never creates orders.
+        </p>
         <ActiveTraderTable loading={loading} onSelect={setSelectedTraderId} selectedId={selectedTraderId} traders={traders} />
       </div>
 
       <TraderDetail selectedTrader={selectedTrader} />
-      <LiveTape liveTrades={liveTrades} />
+      <LiveTape liveTrades={liveTrades} paused={tapePaused} setPaused={setTapePaused} />
     </section>
   );
 }
@@ -645,26 +679,20 @@ function ActiveTraderTable({
       <table>
         <thead>
           <tr>
-            <th>Trader</th>
-            <th>Volume</th>
-            <th>Trades</th>
-            <th>Last activity</th>
-            <th>Market</th>
-            <th>Outcome</th>
-            <th>Price</th>
-            <th>Amount</th>
-            <th>Score</th>
-            <th>Profile</th>
-            <th>Source</th>
+            <th title="Wallet, username, or pseudonym returned by Polymarket.">Trader</th>
+            <th title="Recent notional volume derived from public trade size x price.">Volume</th>
+            <th title="Number of public trades seen in the selected period.">Trades</th>
+            <th title="Most recent public trade timestamp.">Last activity</th>
+            <th title="Market title from the latest public trade.">Market</th>
+            <th title="Outcome label from the latest public trade.">Outcome</th>
+            <th title="Latest public trade price.">Price</th>
+            <th title="Read-only analytical score, not financial advice.">Indicative score</th>
+            <th title="Whether this row uses real public Polymarket data or unavailable fields.">Source</th>
           </tr>
         </thead>
         <tbody>
           {traders.map((trader) => (
-            <tr
-              className={selectedId === trader.id ? "selected" : ""}
-              key={trader.id}
-              onClick={() => onSelect(trader.id)}
-            >
+            <tr className={selectedId === trader.id ? "selected" : ""} key={trader.id} onClick={() => onSelect(trader.id)}>
               <td>
                 <button className="link-button" type="button">
                   {trader.username ?? trader.pseudonym ?? shortWallet(trader.wallet)}
@@ -677,14 +705,10 @@ function ActiveTraderTable({
               <td>{trader.market ?? "unavailable"}</td>
               <td>{trader.outcome ?? "unavailable"}</td>
               <td>{formatProbability(trader.price)}</td>
-              <td>{formatUsd(trader.amount)}</td>
               <td>{formatScore(trader.scores.overallScore)}</td>
               <td>
-                <a href={trader.profileUrl} target="_blank" rel="noreferrer">
-                  Profile
-                </a>
+                <SourceBadge status={trader.dataSourceStatus} />
               </td>
-              <td>{trader.dataSourceStatus}</td>
             </tr>
           ))}
         </tbody>
@@ -694,62 +718,105 @@ function ActiveTraderTable({
 }
 
 function TraderDetail({ selectedTrader }: { selectedTrader: TraderProfileResponse | null }) {
+  const [copied, setCopied] = useState(false);
+
   if (selectedTrader === null) {
     return (
       <aside className="terminal-panel">
         <div className="panel-head">
           <h2>Trader Profile</h2>
         </div>
-        <p className="terminal-empty">Select a trader.</p>
+        <p className="terminal-empty">Select a trader to inspect the public profile context.</p>
       </aside>
     );
   }
 
   const trader = selectedTrader.trader;
   const insufficient = selectedTrader.summary.message !== null;
+  const outcomesTraded = selectedTrader.outcomesTraded ?? [];
+
+  const copyWallet = async () => {
+    await copyToClipboard(trader.wallet);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1_200);
+  };
 
   return (
     <aside className="terminal-panel">
       <div className="panel-head">
         <div>
           <h2>{trader.username ?? trader.pseudonym ?? shortWallet(trader.wallet)}</h2>
-          <p>{selectedTrader.dataSourceStatus}</p>
+          <p>Official public profile and recent public trades.</p>
         </div>
-        <a href={trader.profileUrl} target="_blank" rel="noreferrer">
-          Profile
+        <SourceBadge status={selectedTrader.dataSourceStatus} />
+        <a href={trader.profileUrl} rel="noreferrer" target="_blank">
+          Polymarket
         </a>
       </div>
 
-      {insufficient ? <p className="notice">Données insuffisantes</p> : null}
+      {insufficient ? <p className="notice">Donnees insuffisantes: Polymarket did not return enough public data.</p> : null}
+
+      <div className="wallet-box">
+        <span>{trader.wallet}</span>
+        <button onClick={() => void copyWallet()} type="button">
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
 
       <div className="detail-grid">
-        <Metric label="Wallet" value={shortWallet(trader.wallet)} />
         <Metric label="Volume" value={formatUsd(selectedTrader.summary.volumeRecent)} />
         <Metric label="Trades" value={String(selectedTrader.summary.tradesRecent)} />
         <Metric label="Last activity" value={formatTime(selectedTrader.summary.lastActivity)} />
-        <Metric label="Activity score" value={formatScore(selectedTrader.summary.scores.activityScore)} />
-        <Metric label="Volume score" value={formatScore(selectedTrader.summary.scores.volumeScore)} />
-        <Metric label="Consistency" value={formatScore(selectedTrader.summary.scores.consistencyScore)} />
-        <Metric label="Risk" value="placeholder" />
-        <Metric label="Overall" value={formatScore(selectedTrader.summary.scores.overallScore)} />
+        <Metric label="Data source" value={selectedTrader.dataSourceStatus} />
       </div>
 
-      <h3>Most traded markets</h3>
+      <section className="score-box">
+        <div className="panel-head compact">
+          <h3>Indicative score</h3>
+          <strong>{formatScore(selectedTrader.summary.scores.overallScore)}</strong>
+        </div>
+        <p>Score analytique indicatif en lecture seule, pas un conseil financier.</p>
+        <div className="score-grid">
+          <Metric label="Activity" value={formatScore(selectedTrader.summary.scores.activityScore)} />
+          <Metric label="Volume" value={formatScore(selectedTrader.summary.scores.volumeScore)} />
+          <Metric label="Consistency" value={formatScore(selectedTrader.summary.scores.consistencyScore)} />
+          <Metric label="Risk" value="unavailable" />
+        </div>
+      </section>
+
+      <h3>Top recent markets</h3>
       <div className="mini-list">
         {selectedTrader.marketsMostTraded.length === 0 ? <p>unavailable</p> : null}
         {selectedTrader.marketsMostTraded.map((market) => (
-          <a key={market.conditionId ?? market.marketTitle ?? market.marketSlug ?? "market"} href={market.marketUrl ?? "#"} target="_blank" rel="noreferrer">
+          <a
+            href={market.marketUrl ?? "#"}
+            key={market.conditionId ?? market.marketTitle ?? "market"}
+            rel="noreferrer"
+            target="_blank"
+          >
             <span>{market.marketTitle ?? "unavailable"}</span>
             <strong>{formatUsd(market.volume)}</strong>
           </a>
         ))}
       </div>
 
+      <h3>Outcomes traded</h3>
+      <div className="mini-list">
+        {outcomesTraded.length === 0 ? <p>unavailable</p> : null}
+        {outcomesTraded.map((item) => (
+          <span key={item.outcome ?? "unavailable"}>
+            {item.outcome ?? "unavailable"}
+            <strong>{item.trades} trades</strong>
+          </span>
+        ))}
+      </div>
+
       <h3>Latest trades</h3>
       <div className="mini-list">
+        {selectedTrader.latestTrades.length === 0 ? <p>unavailable</p> : null}
         {selectedTrader.latestTrades.slice(0, 8).map((trade) => (
           <span key={trade.id}>
-            {formatTime(trade.time)} · {trade.side ?? "unavailable"} · {trade.outcome ?? "unavailable"} ·{" "}
+            {formatTime(trade.time)} | {trade.side ?? "unavailable"} | {trade.outcome ?? "unavailable"} |{" "}
             {formatUsd(trade.amount)}
           </span>
         ))}
@@ -758,25 +825,47 @@ function TraderDetail({ selectedTrader }: { selectedTrader: TraderProfileRespons
   );
 }
 
-function LiveTape({ liveTrades }: { liveTrades: NormalizedTrade[] }) {
+function LiveTape({
+  liveTrades,
+  paused,
+  setPaused,
+}: {
+  liveTrades: NormalizedTrade[];
+  paused: boolean;
+  setPaused: (paused: boolean) => void;
+}) {
   return (
     <section className="terminal-panel tape-panel">
       <div className="panel-head">
         <div>
           <h2>Live Trading Tape</h2>
-          <p>Polling public Data API via backend WebSocket</p>
+          <p>Last 50 public trade events, streamed by backend polling.</p>
         </div>
+        <button onClick={() => setPaused(!paused)} type="button">
+          {paused ? "Resume" : "Pause"}
+        </button>
       </div>
 
-      {liveTrades.length === 0 ? <p className="terminal-empty">UNAVAILABLE: no live trades returned.</p> : null}
+      {paused ? <p className="notice">Tape paused locally. No trade events are added while paused.</p> : null}
+      {liveTrades.length === 0 ? <p className="terminal-empty">UNAVAILABLE: no public live trades returned.</p> : null}
       <div className="tape-list">
-        {liveTrades.slice(0, 80).map((trade) => (
+        <div className="tape-row tape-header">
+          <span>Time</span>
+          <span>Trader</span>
+          <span>Action</span>
+          <span>Market</span>
+          <span>Outcome</span>
+          <span>Price</span>
+          <span>Size / Amount</span>
+          <span>Source</span>
+        </div>
+        {liveTrades.slice(0, 50).map((trade) => (
           <div className="tape-row" key={trade.id}>
             <span>{formatTime(trade.time)}</span>
             {trade.profileUrl === null ? (
               <span>{trade.trader ?? "unavailable"}</span>
             ) : (
-              <a href={trade.profileUrl} target="_blank" rel="noreferrer">
+              <a href={trade.profileUrl} rel="noreferrer" target="_blank">
                 {trade.trader ?? shortWallet(trade.wallet)}
               </a>
             )}
@@ -784,13 +873,14 @@ function LiveTape({ liveTrades }: { liveTrades: NormalizedTrade[] }) {
             {trade.marketUrl === null ? (
               <span>{trade.marketTitle ?? "unavailable"}</span>
             ) : (
-              <a href={trade.marketUrl} target="_blank" rel="noreferrer">
+              <a href={trade.marketUrl} rel="noreferrer" target="_blank">
                 {trade.marketTitle ?? "market"}
               </a>
             )}
             <span>{trade.outcome ?? "unavailable"}</span>
             <span>{formatProbability(trade.price)}</span>
-            <span>{formatUsd(trade.amount)}</span>
+            <span>{formatTradeSizeAmount(trade)}</span>
+            <SourceBadge status={trade.dataSourceStatus} />
           </div>
         ))}
       </div>
@@ -811,7 +901,7 @@ function MarketRow({ market, prices }: { market: PublicMarket; prices: Record<st
           </div>
         </div>
         {market.slug !== null ? (
-          <a href={`https://polymarket.com/event/${market.slug}`} target="_blank" rel="noreferrer">
+          <a href={`https://polymarket.com/event/${market.slug}`} rel="noreferrer" target="_blank">
             Open
           </a>
         ) : null}
@@ -853,6 +943,10 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function SourceBadge({ status }: { status: DataSourceStatus }) {
+  return <span className={`source-badge ${status === "REAL POLYMARKET DATA" ? "real" : "unavailable"}`}>{status}</span>;
+}
+
 function buildWebSocketUrl(pathname: string) {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}${pathname}`;
@@ -879,13 +973,11 @@ function normalizeLivePrice(message: ServerMessage): LivePrice | null {
 
   return {
     assetId,
-    eventType: readString(message.eventType) ?? "price",
-    price: readNumber(message.price),
-    bestBid: readNumber(message.bestBid),
     bestAsk: readNumber(message.bestAsk),
-    spread: readNumber(message.spread),
-    side: readString(message.side),
+    bestBid: readNumber(message.bestBid),
+    eventType: readString(message.eventType) ?? "price",
     latencyMs: readNumber(message.latencyMs),
+    price: readNumber(message.price),
     time: readString(message.time) ?? new Date().toISOString(),
   };
 }
@@ -924,15 +1016,25 @@ function formatLatency(value: number | null) {
   return `${Math.round(value)} ms`;
 }
 
+function formatScore(value: number | null) {
+  return value === null ? "unavailable" : `${value}/100`;
+}
+
+function formatTradeSizeAmount(trade: NormalizedTrade) {
+  const size = trade.size === null ? "size unavailable" : `${trade.size.toLocaleString("en-US", { maximumFractionDigits: 4 })}`;
+  const amount = formatUsd(trade.amount);
+  return `${size} / ${amount}`;
+}
+
 function formatUsd(value: number | null) {
   if (value === null || !Number.isFinite(value)) {
     return "unavailable";
   }
 
   return new Intl.NumberFormat("en-US", {
+    currency: "USD",
     maximumFractionDigits: 2,
     style: "currency",
-    currency: "USD",
   }).format(value);
 }
 
@@ -948,16 +1050,20 @@ function formatTime(value: string | null) {
   }).format(new Date(value));
 }
 
-function formatScore(value: number | null) {
-  return value === null ? "unavailable" : `${value}/100`;
-}
-
 function shortWallet(value: string | null) {
   if (value === null) {
     return "unavailable";
   }
 
   return value.length <= 12 ? value : `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
+
+async function copyToClipboard(value: string) {
+  if (navigator.clipboard === undefined) {
+    return;
+  }
+
+  await navigator.clipboard.writeText(value);
 }
 
 function readString(value: unknown): string | null {

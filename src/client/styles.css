@@ -86,7 +86,7 @@ h3 {
 
 table {
   width: 100%;
-  min-width: 980px;
+  min-width: 900px;
   border-collapse: collapse;
 }
 
@@ -351,7 +351,7 @@ tbody tr:hover {
 
 .controls {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 150px 120px minmax(140px, 0.6fr);
+  grid-template-columns: minmax(220px, 1fr) 160px 120px 130px 120px minmax(140px, 0.6fr);
   gap: 10px;
   align-items: end;
 }
@@ -407,6 +407,90 @@ tbody tr:hover {
   background: #11160f;
 }
 
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid #4b5b43;
+  border-radius: 999px;
+  color: #dcebd3;
+  font-size: 0.68rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.source-badge.real {
+  border-color: rgba(136, 214, 108, 0.45);
+  background: rgba(136, 214, 108, 0.1);
+  color: #b9ff9f;
+}
+
+.source-badge.unavailable {
+  border-color: rgba(255, 180, 168, 0.35);
+  background: rgba(255, 180, 168, 0.08);
+  color: #ffb4a8;
+}
+
+.wallet-box {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid #263120;
+  border-radius: 6px;
+  background: #11160f;
+}
+
+.wallet-box span {
+  overflow-wrap: anywhere;
+  color: #dcebd3;
+  font-size: 0.74rem;
+}
+
+.score-box {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #5c4a20;
+  border-radius: 6px;
+  background: #171812;
+}
+
+.score-box p {
+  color: #ffd47a;
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.score-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.score-grid > div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #3e5037;
+  border-radius: 6px;
+  background: #11160f;
+}
+
+.compact {
+  align-items: center;
+}
+
+.compact h3 {
+  margin: 0;
+}
+
+.compact strong {
+  color: #88d66c;
+}
+
 .mini-list {
   display: grid;
   gap: 8px;
@@ -437,7 +521,7 @@ tbody tr:hover {
 
 .tape-row {
   display: grid;
-  grid-template-columns: 82px minmax(110px, 0.8fr) 70px minmax(260px, 1.4fr) minmax(90px, 0.5fr) 90px 100px;
+  grid-template-columns: 82px minmax(110px, 0.75fr) 70px minmax(260px, 1.35fr) minmax(90px, 0.45fr) 90px 150px 145px;
   gap: 10px;
   align-items: center;
   min-height: 36px;
@@ -445,6 +529,16 @@ tbody tr:hover {
   background: #11160f;
   color: #dcebd3;
   font-size: 0.75rem;
+}
+
+.tape-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #1b2418;
+  color: #99a893;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
 .tape-row > * {
@@ -484,8 +578,9 @@ tbody tr:hover {
     grid-template-columns: 80px minmax(120px, 1fr) 70px minmax(180px, 1fr);
   }
 
-  .tape-row span:nth-last-child(-n + 3),
-  .tape-row a:nth-last-child(-n + 3) {
+  .tape-row span:nth-last-child(-n + 4),
+  .tape-row a:nth-last-child(-n + 4),
+  .tape-row .source-badge {
     display: none;
   }
 }
@@ -499,6 +594,7 @@ tbody tr:hover {
   .summary,
   .outcome-grid,
   .detail-grid,
+  .score-grid,
   .price-line {
     grid-template-columns: 1fr;
   }
