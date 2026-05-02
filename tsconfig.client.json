@@ -12,5 +12,5 @@
     "skipLibCheck": true,
     "noUncheckedIndexedAccess": true
   },
-  "include": ["src/client/**/*.tsx", "src/client/**/*.ts", "src/client/**/*.d.ts", "vite.config.ts"]
+  "include": ["src/client/**/*.tsx", "src/client/**/*.ts", "src/client/**/*.d.ts", "src/ui/**/*.ts", "vite.config.ts"]
 }
